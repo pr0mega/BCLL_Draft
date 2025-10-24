@@ -16,18 +16,599 @@
 
     <!-- Your component code pasted here as JSX -->
     <script type="text/babel">
-      // Paste the entire LittleLeagueDraft component here (and helpers)
-      // Keep: export default LittleLeagueDraft; → but instead just render it:
-      // Example minimal mount:
-      // ReactDOM.createRoot(document.getElementById('root')).render(<LittleLeagueDraft />);
-      //
-      // IMPORTANT: Remove any `export`/`import` keywords when pasting;
-      // convert them to plain functions/consts in this block, then:
-      // ReactDOM.createRoot(document.getElementById('root')).render(<LittleLeagueDraft />);
-    </script>
+      const { useState, useEffect, useMemo } = React;
 
-    <script type="text/babel">
-      // After pasting your code above, call:
+      /**
+       * Little League Draft V2 – Full App (renderable)
+       * - Fix: replaced raw CR/LF characters embedded in string literals with escaped sequences ("\n", "\r\n").
+       * - Keeps preview-first export flow and restores full UI.
+       */
+
+      // ===================== Utilities =====================
+      const parseCSV = (text) => {
+        const rows = [];
+        let current = '';
+        let row = [];
+        let inQuotes = false;
+        for (let i = 0; i < text.length; i++) {
+          const c = text[i];
+          const n = text[i + 1];
+          if (c === '"') {
+            if (inQuotes && n === '"') { current += '"'; i++; }
+            else { inQuotes = !inQuotes; }
+          } else if (c === ',' && !inQuotes) {
+            row.push(current.trim()); current = '';
+          } else if ((c === '\n' || c === '\r') && !inQuotes) {
+            if (current.length || row.length) { row.push(current.trim()); rows.push(row); row = []; current = ''; }
+            if (c === '\r' && n === '\n') i++;
+          } else { current += c; }
+        }
+        if (current.length || row.length) { row.push(current.trim()); rows.push(row); }
+        return rows;
+      };
+
+      const exportRosters = (draftState, options = { mode: 'download' }) => {
+        if (!draftState) return;
+        const total = (draftState.teams || []).reduce((sum, t) => sum + (t.roster?.length || 0), 0);
+        if (!total) { if (typeof window !== 'undefined') alert('No players have been drafted to export yet.'); return options.mode === 'preview' ? '' : undefined; }
+        const esc = (v) => '"' + String(v ?? '').replaceAll('"', '""') + '"';
+        let csv = 'Team,Evaluation ID,Player First Name,Player Last Name,Birth Date,League Age,Gender,Jersey Size,Allergies,Parent Email,Cellphone,Address\r\n';
+        for (const team of draftState.teams) {
+          for (const p of team.roster) {
+            const addr = `${p['Street Address']||''}, ${p['City']||''}, ${p['State']||''} ${p['Postal Code']||''}`.trim();
+            csv += [esc(team.name), esc(p['Evaluation ID']), esc(p['Player First Name']), esc(p['Player Last Name']), esc(p['Player Birth Date']), p.leagueAge, esc(p['Player Gender']), esc(p['Jersey Size']), esc(p['Player Allergies']), esc(p['User Email']), esc(p['Cellphone']), esc(addr)].join(',') + '\r\n';
+          }
+        }
+        if (options.mode === 'preview') return csv;
+        if (typeof window !== 'undefined' && typeof document !== 'undefined' && typeof URL !== 'undefined' && typeof Blob !== 'undefined') {
+          const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+          const url = URL.createObjectURL(blob);
+          try { const a = document.createElement('a'); a.href = url; a.download = `${draftState.division}_rosters.csv`; document.body.appendChild(a); a.click(); a.remove(); }
+          finally { try { URL.revokeObjectURL(url); } catch(_) {} }
+        } else { return csv; }
+      };
+
+      function downloadCSV(csv, filename = 'rosters.csv') {
+        if (typeof window === 'undefined' || typeof URL === 'undefined' || typeof document === 'undefined' || typeof Blob === 'undefined') return;
+        const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        try { const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove(); }
+        finally { try { URL.revokeObjectURL(url); } catch(_) {} }
+      }
+
+      function CsvPreviewModal({ csv, filename, onClose, onDownload }) {
+        if (!csv) return null;
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+            <div className="w-full max-w-4xl bg-white rounded-lg shadow-lg overflow-hidden">
+              <div className="px-4 py-3 border-b flex items-center justify-between">
+                <h3 className="font-semibold">CSV Preview</h3>
+                <button onClick={onClose} className="text-gray-600 hover:text-gray-800">✕</button>
+              </div>
+              <div className="p-4">
+                <textarea readOnly value={csv} className="w-full h-80 border rounded p-2 font-mono text-xs whitespace-pre" />
+              </div>
+              <div className="px-4 py-3 border-t flex gap-2 justify-end">
+                <button onClick={onClose} className="px-4 py-2 rounded bg-gray-200 hover:bg-gray-300">Cancel</button>
+                <button onClick={() => onDownload?.(csv, filename)} className="px-4 py-2 rounded bg-yellow-500 text-blue-900 font-semibold hover:bg-yellow-400">Download</button>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      // Dev self-tests for utilities
+      function runUtilTests() {
+        if (typeof process !== 'undefined' && process.env && process.env.NODE_ENV === 'production') return;
+        const csvSample = 'A,B\r\n"x, y",2\n3,4';
+        const rows = parseCSV(csvSample);
+        console.assert(rows.length === 3, 'parseCSV: wrong row count');
+        console.assert(rows[1][0] === 'x, y', 'parseCSV: keep comma in quotes');
+        console.assert(rows[2][1] === '4', 'parseCSV: last cell mismatch');
+        const mock = { division: 'Majors', teams: [{ name: 'Eagles', roster: [{ 'Evaluation ID': 'E1', 'Player First Name':'A','Player Last Name':'B','Player Birth Date':'2014-05-01', leagueAge: 11, 'Player Gender':'M','Jersey Size':'Y','Player Allergies':'','User Email':'a@x.com','Cellphone':'123','Street Address':'1 Main', City:'Town', State:'NV', 'Postal Code':'89005' }] }] };
+        const prev = exportRosters(mock, { mode: 'preview' });
+        console.assert(typeof prev === 'string' && prev.includes('Eagles'), 'exportRosters preview returns CSV');
+        console.log('[Utilities self-tests passed]');
+      }
+      try { runUtilTests(); } catch(_) {}
+
+      // ===================== App =====================
+      const REQUIRED_HEADERS = [
+        'Evaluation ID',
+        'Account First Name', 'Account Last Name',
+        'Player First Name', 'Player Last Name', 'Player Gender', 'Player Birth Date',
+        'Street Address', 'City', 'State', 'Postal Code',
+        'User Email', 'Cellphone', 'Jersey Size', 'Player Allergies'
+      ];
+
+      const initialDivisions = [
+        { name: 'Rookies', order: 1, teams: [] },
+        { name: 'Minors', order: 2, teams: [] },
+        { name: 'Majors', order: 3, teams: [] },
+        { name: 'Juniors', order: 4, teams: [] }
+      ];
+
+      const STORAGE = {
+        players: 'bcll_draft_players_v2',
+        divisions: 'bcll_draft_divisions_v2',
+        draft: 'bcll_draft_state_v2',
+        seasonYear: 'bcll_draft_season_year_v2',
+        settings: 'bcll_draft_settings_v2',
+      };
+
+      function LittleLeagueDraft() {
+        const [step, setStep] = useState('upload');
+        const [players, setPlayers] = useState([]);
+        const [divisions, setDivisions] = useState(initialDivisions);
+        const [draftState, setDraftState] = useState(null);
+        const [searchTerm, setSearchTerm] = useState('');
+        const [filterAge, setFilterAge] = useState('all');
+        const [viewMode, setViewMode] = useState('admin');
+        const [errors, setErrors] = useState([]);
+        const [hasSavedSession, setHasSavedSession] = useState(false);
+
+        const defaultSeasonYear = useMemo(() => {
+          const t = new Date();
+          return t.getMonth() >= 8 ? t.getFullYear() + 1 : t.getFullYear();
+        }, []);
+        const [seasonYear, setSeasonYear] = useState(() => {
+          const saved = localStorage.getItem(STORAGE.seasonYear);
+          return saved ? parseInt(saved) : defaultSeasonYear;
+        });
+        const [settings, setSettings] = useState(() => {
+          const saved = localStorage.getItem(STORAGE.settings);
+          return saved ? JSON.parse(saved) : { autoDraftSiblings: true };
+        });
+
+        // Persistence
+        useEffect(() => {
+          const p = localStorage.getItem(STORAGE.players);
+          const d = localStorage.getItem(STORAGE.divisions);
+          const ds = localStorage.getItem(STORAGE.draft);
+          if (p) setPlayers(JSON.parse(p));
+          if (d) setDivisions(JSON.parse(d));
+          if (ds) setDraftState(JSON.parse(ds));
+          if (p || d || ds) setHasSavedSession(true);
+        }, []);
+        useEffect(() => { localStorage.setItem(STORAGE.players, JSON.stringify(players)); }, [players]);
+        useEffect(() => { localStorage.setItem(STORAGE.divisions, JSON.stringify(divisions)); }, [divisions]);
+        useEffect(() => { draftState ? localStorage.setItem(STORAGE.draft, JSON.stringify(draftState)) : localStorage.removeItem(STORAGE.draft); }, [draftState]);
+        useEffect(() => { localStorage.setItem(STORAGE.seasonYear, String(seasonYear)); }, [seasonYear]);
+        useEffect(() => { localStorage.setItem(STORAGE.settings, JSON.stringify(settings)); }, [settings]);
+
+        // League Age (Aug 31 cutoff of seasonYear)
+        const calculateLeagueAge = (birthDateStr) => {
+          if (!birthDateStr) return 0;
+          const birth = new Date(birthDateStr);
+          if (isNaN(birth.getTime())) return 0;
+          const cutoff = new Date(seasonYear, 7, 31);
+          let age = cutoff.getFullYear() - birth.getFullYear();
+          const m = cutoff.getMonth() - birth.getMonth();
+          if (m < 0 || (m === 0 && cutoff.getDate() < birth.getDate())) age--;
+          return age;
+        };
+
+        // Upload handler
+        const handleFileUpload = (e) => {
+          const file = e.target.files?.[0]; if (!file) return;
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            const rows = parseCSV(String(ev.target?.result || ''));
+            if (!rows.length) { setErrors(['CSV appears empty.']); return; }
+            const headers = rows[0];
+            const missing = REQUIRED_HEADERS.filter(h => !headers.includes(h));
+            if (missing.length) { setErrors([`Missing required columns: ${missing.join(', ')}`]); return; }
+            const idx = Object.fromEntries(headers.map((h, i) => [h, i]));
+            const parsed = rows.slice(1).filter(r => r.some(c => String(c).trim())).map((r, i) => {
+              const p = Object.fromEntries(headers.map(h => [h, r[idx[h]] ?? '']));
+              p.id = `player-${i}`;
+              p.leagueAge = calculateLeagueAge(p['Player Birth Date']);
+              if (p.leagueAge < 8) p.division = 'Rookies';
+              else if (p.leagueAge === 12) p.division = 'Majors';
+              else if (p.leagueAge >= 13) p.division = 'Juniors';
+              else p.division = '';
+              return p;
+            });
+            setErrors([]); setPlayers(parsed); setStep('assign');
+          };
+          reader.readAsText(file);
+        };
+
+        // Helpers
+        const findSiblings = (list) => {
+          const groups = {}; list.forEach(p => { const key = `${(p['Account Last Name']||'').trim()}|${(p['Street Address']||'').trim()}`.toLowerCase(); (groups[key] ||= []).push(p.id); });
+          return Object.values(groups).filter(g => g.length > 1);
+        };
+
+        const finishAssignment = (divisionTeams) => { setDivisions(divisions.map(div => ({ ...div, teams: divisionTeams[div.name] || [] }))); setStep('draft'); };
+
+        const startDivisionDraft = (division) => {
+          const divisionPlayers = players.filter(p => !p.drafted && p.division === division.name);
+          const teams = (division.teams || []).map(name => ({ name, roster: [] }));
+          if (!teams.length) { alert('Please set up teams for this division first.'); return; }
+          setDraftState({ division: division.name, teams, availablePlayers: divisionPlayers, currentRound: 1, currentPick: 0, draftOrder: generateDraftOrder(teams.length, divisionPlayers.length), pickHistory: [] });
+        };
+
+        const generateDraftOrder = (teamCount, playerCount) => {
+          const order = []; if (teamCount <= 0) return order; const rounds = Math.ceil(playerCount / teamCount);
+          for (let r = 0; r < rounds; r++) { if (r % 2 === 0) for (let t = 0; t < teamCount; t++) order.push(t); else for (let t = teamCount - 1; t >= 0; t--) order.push(t); }
+          return order;
+        };
+
+        const draftPlayer = (player) => {
+          if (!draftState) return; const teamIndex = draftState.draftOrder[draftState.currentPick]; if (teamIndex === undefined) return;
+          const teams = draftState.teams.map(t => ({ ...t, roster: [...t.roster] }));
+          teams[teamIndex].roster.push(player);
+          const avail = draftState.availablePlayers.filter(p => p.id !== player.id);
+          const groups = settings.autoDraftSiblings ? findSiblings(players) : [];
+          const group = groups.find(g => g.includes(player.id)); const sibNames = [], sibIds = [];
+          if (group) group.forEach(id => { if (id !== player.id) { const s = avail.find(p => p.id === id); if (s) { teams[teamIndex].roster.push(s); avail.splice(avail.indexOf(s), 1); sibNames.push(s['Evaluation ID']); sibIds.push(s.id); } } });
+          const nextPick = draftState.currentPick + 1;
+          setDraftState({ ...draftState, teams, availablePlayers: avail, currentPick: nextPick, currentRound: Math.floor(nextPick / draftState.teams.length) + 1, pickHistory: [...draftState.pickHistory, { round: draftState.currentRound, pick: nextPick, team: draftState.teams[teamIndex].name, player: player['Evaluation ID'], playerId: player.id, age: player.leagueAge, siblings: sibNames, siblingIds: sibIds }] });
+          setPlayers(players.map(p => (p.id === player.id || sibIds.includes(p.id)) ? { ...p, drafted: true } : p));
+        };
+
+        const undoLastPick = () => {
+          if (!draftState || !draftState.pickHistory.length) return;
+          const lastPick = draftState.pickHistory[draftState.pickHistory.length - 1];
+          const lastIdx = draftState.currentPick - 1; const teamIndex = draftState.draftOrder[lastIdx]; if (teamIndex === undefined) return;
+          const teams = draftState.teams.map(t => ({ ...t, roster: [...t.roster] }));
+          const ids = [lastPick.playerId, ...(lastPick.siblingIds || [])]; const removed = [];
+          teams[teamIndex].roster = teams[teamIndex].roster.filter(p => { if (ids.includes(p.id)) { removed.push(p); return false; } return true; });
+          setDraftState({ ...draftState, teams, availablePlayers: [...draftState.availablePlayers, ...removed], currentPick: lastIdx, currentRound: Math.floor(lastIdx / draftState.teams.length) + 1, pickHistory: draftState.pickHistory.slice(0, -1) });
+          setPlayers(players.map(p => (ids.includes(p.id) ? { ...p, drafted: false } : p)));
+        };
+
+        const oldestAge = () => (draftState && draftState.availablePlayers.length ? Math.max(...draftState.availablePlayers.map(p => p.leagueAge)) : null);
+        const filteredPlayers = useMemo(() => {
+          if (!draftState) return []; const term = searchTerm.trim().toLowerCase();
+          return draftState.availablePlayers.filter(p => {
+            const hit = !term || (p['Evaluation ID']||'').toLowerCase().includes(term) || `${(p['Player First Name']||'').toLowerCase()} ${(p['Player Last Name']||'').toLowerCase()}`.includes(term);
+            const ageOk = filterAge === 'all' || p.leagueAge === parseInt(filterAge);
+            return hit && ageOk;
+          }).sort((a,b)=>b.leagueAge-a.leagueAge);
+        }, [draftState, searchTerm, filterAge]);
+        const availableAges = useMemo(() => (draftState ? [...new Set(draftState.availablePlayers.map(p => p.leagueAge))].sort((a,b)=>b-a) : []), [draftState]);
+
+        const clearAll = () => {
+          if (!window.confirm('Clear all data and restart?')) return;
+          setPlayers([]); setDivisions(initialDivisions); setDraftState(null); setStep('upload');
+          localStorage.removeItem(STORAGE.players); localStorage.removeItem(STORAGE.divisions); localStorage.removeItem(STORAGE.draft);
+        };
+
+        // Preview state for CSV
+        const [csvPreview, setCsvPreview] = useState('');
+        const [showPreview, setShowPreview] = useState(false);
+        const onExportClick = () => {
+          if (!draftState) return; const csv = exportRosters(draftState, { mode: 'preview' });
+          if (csv) { setCsvPreview(csv); setShowPreview(true); }
+        };
+
+        // Screens
+        if (step === 'upload') return (
+          <div className="min-h-screen bg-gradient-to-br from-blue-950 to-blue-900 p-8 text-blue-900">
+            <div className="max-w-2xl mx-auto">
+              <div className="bg-white rounded-lg shadow-lg p-8">
+                <div className="text-center mb-8">
+                  <div className="text-4xl mb-2">⚾</div>
+                  <h1 className="text-3xl font-bold mb-2">Boulder City Little League</h1>
+                  <p className="text-gray-600">Draft Management System</p>
+                </div>
+                {hasSavedSession && (
+                  <div className="mb-6 p-4 bg-yellow-50 border border-yellow-200 rounded">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="text-sm text-yellow-800">Previous session detected. You can resume or start a new draft.</div>
+                      <div className="flex gap-2">
+                        <button onClick={()=>{ const ds = localStorage.getItem(STORAGE.draft); setStep(ds ? 'draft' : 'assign'); }} className="px-3 py-1.5 bg-yellow-500 text-blue-900 font-semibold rounded hover:bg-yellow-400">Resume</button>
+                        <button onClick={()=>{ localStorage.removeItem(STORAGE.players); localStorage.removeItem(STORAGE.divisions); localStorage.removeItem(STORAGE.draft); setHasSavedSession(false); setPlayers([]); setDivisions(initialDivisions); setDraftState(null); setStep('upload'); }} className="px-3 py-1.5 bg-gray-200 text-gray-800 rounded hover:bg-gray-300">Start new</button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+                <div className="border-2 border-dashed border-gray-300 rounded-lg p-12 text-center hover:border-yellow-500 transition">
+                  <div className="text-gray-400 text-5xl mb-4">📤</div>
+                  <label className="cursor-pointer">
+                    <span className="hover:text-blue-700 font-medium">Upload player registration CSV</span>
+                    <input type="file" accept=".csv" onChange={handleFileUpload} className="hidden" />
+                  </label>
+                  <p className="text-sm text-gray-500 mt-2">CSV file with player registration data</p>
+                </div>
+                {!!errors.length && (
+                  <div className="mt-6 p-4 bg-red-50 border border-red-200 rounded text-red-800">
+                    <div className="font-semibold mb-1">CSV Errors</div>
+                    <ul className="list-disc ml-6 text-sm">{errors.map((e,i)=>(<li key={i}>{e}</li>))}</ul>
+                  </div>
+                )}
+                <div className="mt-6 p-4 bg-blue-50 rounded-lg text-sm text-gray-700">
+                  <p className="font-medium mb-1">Required CSV columns:</p>
+                  <p className="text-xs">{REQUIRED_HEADERS.join(', ')}</p>
+                  <p className="text-xs mt-2 font-medium">Auto-assignment rules (by LEAGUE age):</p>
+                  <ul className="text-xs list-disc ml-5">
+                    <li>&lt; 8 → Rookies</li>
+                    <li>8 → Manual (Rookies or Minors)</li>
+                    <li>9–11 → Manual (Minors or Majors)</li>
+                    <li>12 → Majors</li>
+                    <li>13+ → Juniors</li>
+                  </ul>
+                </div>
+                <div className="mt-4 flex justify-end">
+                  <button onClick={clearAll} className="text-sm text-gray-500 hover:text-gray-700">Reset</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+
+        if (step === 'assign') return (
+          <PlayerAssignment players={players} setPlayers={setPlayers} onComplete={()=>setStep('teams')} />
+        );
+
+        if (step === 'teams') return (
+          <TeamSetup divisions={divisions} players={players} onComplete={finishAssignment} />
+        );
+
+        if (step === 'draft') {
+          if (!draftState) return <DivisionSelector divisions={divisions} players={players} onSelectDivision={startDivisionDraft} />;
+          if (viewMode === 'display') return <DisplayBoard draftState={draftState} onBack={()=>setViewMode('admin')} />;
+          const currentTeamIndex = draftState.draftOrder[draftState.currentPick];
+          const currentTeam = draftState.teams[currentTeamIndex];
+          const oldest = oldestAge();
+          return (
+            <div className="min-h-screen bg-gray-50 p-4">
+              <div className="max-w-7xl mx-auto">
+                <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
+                  <div className="flex justify-between items-center mb-4 flex-wrap gap-4">
+                    <div className="flex items-center gap-4">
+                      <div className="text-2xl">⚾</div>
+                      <div>
+                        <h1 className="text-2xl font-bold text-gray-900">{draftState.division} Draft – ADMIN VIEW</h1>
+                        <p className="text-gray-600">Round {draftState.currentRound} • Pick {draftState.currentPick + 1} • Season {seasonYear}</p>
+                      </div>
+                    </div>
+                    <div className="flex gap-2 flex-wrap">
+                      <button onClick={undoLastPick} disabled={!draftState.pickHistory.length} className={`px-4 py-2 font-semibold rounded-lg ${draftState.pickHistory.length? 'bg-red-600 text-white hover:bg-red-700':'bg-gray-300 text-gray-500 cursor-not-allowed'}`}>↶ Undo</button>
+                      <button onClick={()=>setViewMode('display')} className="px-4 py-2 bg-yellow-500 text-blue-900 font-semibold rounded-lg hover:bg-yellow-400">📺 Big Screen</button>
+                      <button onClick={onExportClick} disabled={draftState.teams.reduce((s,t)=>s+t.roster.length,0)===0} className={`px-4 py-2 font-semibold rounded-lg ${draftState.teams.reduce((s,t)=>s+t.roster.length,0)>0 ? 'bg-blue-900 text-yellow-400 hover:bg-blue-800' : 'bg-gray-300 text-gray-500 cursor-not-allowed'}`}>💾 Export Rosters</button>
+                      <button onClick={()=>setDraftState(null)} className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700">Back</button>
+                    </div>
+                  </div>
+                  <div className="bg-gradient-to-r from-blue-900 to-blue-950 border-l-4 border-yellow-500 p-4 mb-4 rounded">
+                    <p className="text-lg font-semibold text-yellow-400">Now Drafting: {currentTeam?.name}</p>
+                    {oldest && <p className="text-sm text-yellow-200 mt-1">Current Priority: {oldest} year olds ({draftState.availablePlayers.filter(p=>p.leagueAge===oldest).length} remaining)</p>}
+                  </div>
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    <div className="lg:col-span-2">
+                      <div className="mb-4 flex gap-2 flex-wrap">
+                        <div className="flex-1 min-w-[220px] relative">
+                          <span className="absolute left-3 top-2.5">🔍</span>
+                          <input type="text" placeholder="Search by Eval ID or name..." value={searchTerm} onChange={e=>setSearchTerm(e.target.value)} className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+                        </div>
+                        <select value={filterAge} onChange={e=>setFilterAge(e.target.value)} className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
+                          <option value="all">All Ages</option>
+                          {availableAges.map(age => <option key={age} value={age}>{age} years old</option>)}
+                        </select>
+                      </div>
+                      <div className="bg-gray-50 rounded-lg p-4 max-h-96 overflow-y-auto">
+                        <h3 className="font-semibold mb-3">Available Players ({filteredPlayers.length})</h3>
+                        <div className="space-y-2">
+                          {filteredPlayers.map(p => (
+                            <div key={p.id} className={`bg-white p-3 rounded-lg shadow-sm hover:shadow-md transition cursor-pointer ${p.leagueAge===oldest?'border-2 border-yellow-500':''}`} onClick={()=>draftPlayer(p)}>
+                              <div className="flex justify-between items-center">
+                                <div>
+                                  <p className="font-bold text-lg">ID: {p['Evaluation ID']}</p>
+                                  <p className="text-sm text-gray-600">Age: {p.leagueAge} • Gender: {p['Player Gender']}</p>
+                                  <p className="text-xs text-gray-500">{p['Player First Name']} {p['Player Last Name']}</p>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                    <div>
+                      <div className="bg-gray-50 rounded-lg p-4 max-h-96 overflow-y-auto">
+                        <h3 className="font-semibold mb-3">Team Rosters</h3>
+                        {draftState.teams.map((team, idx) => (
+                          <div key={idx} className="mb-4">
+                            <div className={`font-semibold p-2 rounded ${idx===currentTeamIndex?'bg-blue-900 text-yellow-400':'bg-gray-200'}`}>{team.name} ({team.roster.length})</div>
+                            <div className="text-sm mt-1 space-y-1">
+                              {team.roster.map((p,i)=>(<div key={i} className="pl-2 text-gray-700">ID: {p['Evaluation ID']} ({p.leagueAge}y)</div>))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              {showPreview && (
+                <CsvPreviewModal
+                  csv={csvPreview}
+                  filename={`${draftState.division}_rosters.csv`}
+                  onClose={()=>setShowPreview(false)}
+                  onDownload={(csv, filename)=>{ downloadCSV(csv, filename); setShowPreview(false); }}
+                />
+              )}
+            </div>
+          );
+        }
+
+        return null;
+      }
+
+      function PlayerAssignment({ players, setPlayers, onComplete }) {
+        const assign = (id, division) => setPlayers(players.map(p => p.id===id ? { ...p, division } : p));
+        const needs = players.filter(p => !p.division);
+        const auto = players.filter(p => p.division);
+        return (
+          <div className="min-h-screen bg-gray-50 p-8">
+            <div className="max-w-6xl mx-auto">
+              <div className="bg-white rounded-lg shadow-lg p-8">
+                <div className="flex items-center justify-between gap-4 mb-6">
+                  <div className="flex items-center gap-4"><div className="text-2xl">⚾</div><h2 className="text-2xl font-bold text-blue-900">Assign Players to Divisions</h2></div>
+                  <button onClick={()=>{ localStorage.removeItem('bcll_draft_players_v2'); localStorage.removeItem('bcll_draft_divisions_v2'); localStorage.removeItem('bcll_draft_state_v2'); window.location.reload(); }} className="text-sm text-gray-500 hover:text-gray-700">Reset</button>
+                </div>
+                {!!auto.length && (<div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-lg"><p className="text-sm font-medium text-green-800">✓ {auto.length} players auto-assigned (LT 8 → Rookies, 12 → Majors, 13+ → Juniors)</p></div>)}
+                {!!needs.length ? (
+                  <>
+                    <p className="text-gray-600 mb-4">Assign the remaining {needs.length} players to their divisions:</p>
+                    <div className="overflow-x-auto">
+                      <table className="w-full">
+                        <thead>
+                          <tr className="border-b"><th className="text-left p-2">Evaluation ID</th><th className="text-left p-2">Player Name</th><th className="text-left p-2">League Age</th><th className="text-left p-2">Division</th></tr>
+                        </thead>
+                        <tbody>
+                          {needs.map(p => (
+                            <tr key={p.id} className="border-b hover:bg-gray-50">
+                              <td className="p-2 font-semibold">{p['Evaluation ID']}</td>
+                              <td className="p-2">{p['Player First Name']} {p['Player Last Name']}</td>
+                              <td className="p-2">{p.leagueAge}</td>
+                              <td className="p-2">
+                                <select value={p.division || ''} onChange={e=>assign(p.id, e.target.value)} className="px-2 py-1 border border-gray-300 rounded">
+                                  <option value="">Select Division</option>
+                                  {p.leagueAge===8 ? (<><option value="Rookies">Rookies</option><option value="Minors">Minors</option></>) : (<><option value="Minors">Minors</option><option value="Majors">Majors</option></>)}
+                                </select>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                ) : (<div className="p-4 bg-green-50 border border-green-200 rounded-lg text-center"><p className="text-green-800 font-medium">All players have been assigned to divisions!</p></div>)}
+                <button onClick={onComplete} disabled={needs.length>0} className={`mt-6 w-full py-3 font-bold rounded-lg ${needs.length===0 ? 'bg-yellow-500 text-blue-900 hover:bg-yellow-400 cursor-pointer' : 'bg-gray-300 text-gray-500 cursor-not-allowed'}`}>
+                  {needs.length===0 ? 'Next: Set Up Teams' : `Assign ${needs.length} more players`}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      function TeamSetup({ divisions, players, onComplete }) {
+        const [divisionTeams, setDivisionTeams] = useState({ Rookies: [], Minors: [], Majors: [], Juniors: [] });
+        const [teamCounts, setTeamCounts] = useState({ Rookies: 4, Minors: 4, Majors: 4, Juniors: 4 });
+        const updateTeamCount = (div, count) => { const n = Math.max(1, Math.min(20, parseInt(count)||0)); setTeamCounts({ ...teamCounts, [div]: n }); setDivisionTeams({ ...divisionTeams, [div]: Array(n).fill('').map((_,i)=>divisionTeams[div][i]||'') }); };
+        const updateTeamName = (div, i, name) => { const arr = [...divisionTeams[div]]; arr[i]=name; setDivisionTeams({...divisionTeams, [div]: arr}); };
+        const allNamed = () => Object.keys(divisionTeams).every(d => divisionTeams[d].length>0 && divisionTeams[d].every(n=>n.trim()!==''));
+        return (
+          <div className="min-h-screen bg-gradient-to-br from-blue-950 to-blue-900 p-8">
+            <div className="max-w-4xl mx-auto">
+              <div className="bg-white rounded-lg shadow-lg p-8">
+                <div className="flex items-center gap-4 mb-6"><div className="text-2xl">⚾</div><h2 className="text-2xl font-bold text-blue-900">Set Up Teams for Each Division</h2></div>
+                {['Rookies','Minors','Majors','Juniors'].map(divName => (
+                  <div key={divName} className="mb-6 p-4 border border-gray-200 rounded-lg">
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 className="text-xl font-bold text-blue-900">{divName}</h3>
+                      <span className="text-sm px-2 py-1 rounded bg-blue-50 text-blue-900 border border-blue-200">{players.filter(p=>p.division===divName && !p.drafted).length} players in pool</span>
+                    </div>
+                    <div className="mb-4">
+                      <label className="block text-sm font-medium mb-2">Number of Teams:</label>
+                      <input type="number" value={teamCounts[divName]} onChange={e=>updateTeamCount(divName, e.target.value)} className="px-4 py-2 border border-gray-300 rounded-lg w-32" min="1" max="20" />
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      {(divisionTeams[divName]||[]).map((team, idx)=>(
+                        <input key={idx} type="text" placeholder={`Team ${idx+1} Name`} value={team} onChange={e=>updateTeamName(divName, idx, e.target.value)} className="px-3 py-2 border border-gray-300 rounded-lg" />
+                      ))}
+                    </div>
+                  </div>
+                ))}
+                <button onClick={()=>onComplete(divisionTeams)} disabled={!allNamed()} className={`w-full py-3 font-bold rounded-lg ${allNamed()? 'bg-yellow-500 text-blue-900 hover:bg-yellow-400 cursor-pointer':'bg-gray-300 text-gray-500 cursor-not-allowed'}`}>
+                  {allNamed()? 'Start Draft' : 'Please name all teams'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      function DivisionSelector({ divisions, players, onSelectDivision }) {
+        const sorted = [...divisions].sort((a,b)=>a.order-b.order);
+        return (
+          <div className="min-h-screen bg-gradient-to-br from-blue-950 to-blue-900 p-8">
+            <div className="max-w-4xl mx-auto">
+              <div className="bg-white rounded-lg shadow-lg p-8">
+                <div className="flex items-center gap-4 mb-4"><div className="text-2xl">⚾</div><div><h2 className="text-2xl font-bold text-blue-900">Select Division to Draft</h2><p className="text-gray-600">Draft Order: Rookies → Minors → Majors → Juniors</p></div></div>
+                <div className="grid gap-4">
+                  {sorted.map((div, i) => {
+                    const count = players.filter(p=>p.division===div.name && !p.drafted).length;
+                    return (
+                      <div key={i} onClick={()=>onSelectDivision(div)} className="p-6 border-2 border-gray-200 rounded-lg hover:border-yellow-500 hover:shadow-lg cursor-pointer transition">
+                        <div className="flex justify-between items-center">
+                          <div>
+                            <h3 className="text-xl font-bold mb-2 text-blue-900">{div.name}</h3>
+                            <p className="text-gray-600">{div.teams?.length||0} teams • {count} players available</p>
+                            {!!(div.teams?.length) && (<div className="mt-2 text-sm text-gray-500">Teams: {div.teams.join(', ')}</div>)}
+                          </div>
+                          <div className="text-4xl font-bold text-blue-900 opacity-20">{div.order}</div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      function DisplayBoard({ draftState, onBack }) {
+        const currentTeamIndex = draftState.draftOrder[draftState.currentPick];
+        const recent = draftState.pickHistory.slice(-8).reverse();
+        return (
+          <div className="min-h-screen bg-gradient-to-br from-blue-950 via-blue-900 to-blue-950 p-8 text-yellow-400">
+            <div className="max-w-7xl mx-auto">
+              <button onClick={onBack} className="mb-4 px-4 py-2 bg-yellow-500 text-blue-900 font-semibold rounded-lg hover:bg-yellow-400">← Back to Admin View</button>
+              <div className="bg-blue-900/50 backdrop-blur-lg rounded-2xl shadow-2xl p-8 mb-8 border-2 border-yellow-500">
+                <div className="text-center text-yellow-200 text-2xl mb-6">Round {draftState.currentRound} • Pick {draftState.currentPick + 1}</div>
+                <div className="bg-gradient-to-r from-yellow-500 to-yellow-400 rounded-xl p-8 text-center shadow-2xl">
+                  <div className="text-xl font-semibold text-blue-950 mb-2">NOW DRAFTING</div>
+                  <div className="text-6xl font-bold text-blue-950">{draftState.teams[currentTeamIndex]?.name}</div>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                <div className="bg-blue-900/50 backdrop-blur-lg rounded-2xl shadow-2xl p-6 border border-yellow-500/50">
+                  <h2 className="text-3xl font-bold text-yellow-400 mb-6">Recent Picks</h2>
+                  <div className="space-y-3">
+                    {recent.map((pick, i) => (
+                      <div key={i} className="bg-blue-950/60 rounded-lg p-4 border border-yellow-500/30">
+                        <div className="flex justify-between items-start">
+                          <div>
+                            <div className="text-yellow-200 text-sm">Round {pick.round} • Pick {pick.pick}</div>
+                            <div className="text-2xl font-bold text-yellow-400 mt-1">ID: {pick.player}</div>
+                            <div className="text-yellow-100 text-sm">Age {pick.age}</div>
+                            {!!(pick.siblings?.length) && (<div className="text-yellow-300 text-xs mt-1">+ Siblings: {pick.siblings.join(', ')}</div>)}
+                          </div>
+                          <div className="text-right"><div className="text-xl font-bold text-yellow-400">{pick.team}</div></div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="bg-blue-900/50 backdrop-blur-lg rounded-2xl shadow-2xl p-6 border border-yellow-500/50">
+                  <h2 className="text-3xl font-bold text-yellow-400 mb-6">Team Rosters</h2>
+                  <div className="space-y-4 max-h-96 overflow-y-auto">
+                    {draftState.teams.map((team, idx) => (
+                      <div key={idx} className={`rounded-lg p-4 border-2 ${idx===currentTeamIndex?'bg-gradient-to-r from-yellow-500 to-yellow-400 border-yellow-300':'bg-blue-950/60 border-yellow-500/30'}`}>
+                        <div className="flex justify-between items-center mb-2">
+                          <div className={`text-xl font-bold ${idx===currentTeamIndex?'text-blue-950':'text-yellow-400'}`}>{team.name}</div>
+                          <div className={`text-lg font-semibold ${idx===currentTeamIndex?'text-blue-900':'text-yellow-200'}`}>{team.roster.length} players</div>
+                        </div>
+                        <div className={`${idx===currentTeamIndex?'text-blue-900':'text-yellow-100'} text-sm`}>
+                          {team.roster.slice(0,5).map((p, i)=>(<div key={i}>ID: {p['Evaluation ID']} ({p.leagueAge}y)</div>))}
+                          {team.roster.length>5 && (<div className="italic">+ {team.roster.length-5} more...</div>)}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      // Render the app
       ReactDOM.createRoot(document.getElementById('root')).render(<LittleLeagueDraft />);
     </script>
   </body>
